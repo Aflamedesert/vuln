@@ -1,0 +1,19 @@
+services:
+  scanner:
+    build: .
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    volumes:
+      - .:/app
+      - ~/.vuln-scanner:/root/.vuln-scanner
+
+  target:
+    image: tleemcjr/metasploitable2
+    networks:
+      - scannet
+
+networks:
+  scannet:
+    driver: bridge
