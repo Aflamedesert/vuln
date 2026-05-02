@@ -42,6 +42,53 @@ mypy scanner/
 pytest --cov=scanner
 ```
 
+## Development
+
+Install the package in editable mode with all dev dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+### Running tests
+
+```bash
+# Full suite with coverage report
+pytest tests/ --cov=scanner --cov-report=term-missing -v
+
+# Unit tests only
+pytest tests/unit/ -v
+
+# Integration tests only (starts a local echo server on 127.0.0.1:19922)
+pytest tests/integration/ -v
+
+# Run a single test file
+pytest tests/unit/test_os_fingerprint.py -v
+
+# Coverage gate — must be >= 80%
+pytest tests/ --cov=scanner --cov-report=xml && \
+  python -c "
+import xml.etree.ElementTree as ET
+r = float(ET.parse('coverage.xml').getroot().get('line-rate', 0))
+print(f'Coverage: {r*100:.1f}%')
+assert r >= 0.80, f'Below 80% gate ({r*100:.1f}%)'
+"
+```
+
+### Lint + type-check
+
+```bash
+ruff check scanner/ && mypy scanner/
+```
+
+### CI
+
+The GitHub Actions workflow (`.github/workflows/test.yml`) runs on every push and pull request:
+1. Installs `libpcap-dev` and `pip install -e ".[dev]"`
+2. Runs `pytest tests/ --cov=scanner --cov-report=xml -v`
+3. Enforces the ≥ 80% coverage gate
+4. Uploads results to Codecov
+
 ---
 
 ## Architecture

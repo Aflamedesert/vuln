@@ -87,6 +87,58 @@ pytest --cov=scanner
 - `enrich_service` calls `match_banner`, queries `cpe_matches`, filters by `version_in_range`, fetches full CVE records, sorts by CVSS score descending.
 - `enrich_results` wraps a list of `ScanResult` objects and returns `list[EnrichedScanResult]`.
 
+## Testing
+
+### Test layout
+
+```
+tests/
+├── conftest.py               shared fixtures (mem_db, sample_cve, syn_ack_*)
+├── unit/
+│   ├── test_banner_grabber.py   _guess_service, _parse_version, connection errors
+│   ├── test_cli.py              Click CliRunner tests for all commands
+│   ├── test_cpe_matcher.py      normalize_banner, extract_components, match_banner
+│   ├── test_cve_lookup.py       enrich_service, enrich_results, version range filter
+│   ├── test_cvss_scorer.py      score_to_severity boundary cases
+│   ├── test_db.py               get_db, log_sync, schema idempotency
+│   ├── test_nvd_sync.py         _parse_cve, _parse_cpe_matches, _date_windows, sync_nvd
+│   ├── test_os_fingerprint.py   TTL+window, TTL-only, window-only, unknown
+│   ├── test_port_scanner.py     parse_port_range, expand_targets, _tcp_connect_probe
+│   └── test_version_range.py    version_in_range boundary cases
+└── integration/
+    ├── test_db_sync.py           create_tables idempotency, upsert CVE/CPE
+    └── test_scan_pipeline.py     live echo server at 127.0.0.1:19922
+```
+
+### Running tests
+
+```bash
+# All tests with coverage (must be >= 80%)
+pytest tests/ --cov=scanner --cov-report=term-missing -v
+
+# Unit tests only (no network or raw-socket requirements)
+pytest tests/unit/ -v
+
+# Integration tests (spin up a local TCP echo server)
+pytest tests/integration/ -v
+```
+
+### Key fixtures (tests/conftest.py)
+
+| Fixture | Description |
+|---|---|
+| `mem_db` | In-memory SQLite connection with full schema |
+| `sample_cve` | `mem_db` populated with CVE-2021-44228 (Log4Shell, CVSS 10.0) |
+| `syn_ack_linux` | Scapy IP(ttl=64)/TCP(flags="SA", window=65535) packet |
+| `syn_ack_windows` | Scapy IP(ttl=128)/TCP(flags="SA", window=8192) packet |
+| `syn_ack_cisco` | Scapy IP(ttl=255)/TCP(flags="SA", window=4128) packet |
+
+### Mocking strategy
+
+- **CLI tests** use Click's `CliRunner` and mock `scan_host`, `grab_banner`, `fingerprint_os`, `enrich_results` as `AsyncMock`/regular mocks so no network calls happen.
+- **nvd_sync tests** patch `_fetch_page` to return canned JSON; `time.sleep` is also patched to keep tests fast.
+- **Integration tests** start a real `socket.socket` echo server in a background thread; `scan_host` and `grab_banner` hit it via TCP connect (no `CAP_NET_RAW` required).
+
 ## Known Constraints
 
 - Raw socket operations (`scan`) require `CAP_NET_RAW`. Run inside Docker (`docker compose run scanner …`) or with `sudo` locally.
