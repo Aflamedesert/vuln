@@ -72,8 +72,8 @@ pytest --cov=scanner
 - `upsert_cve` / `upsert_cpe_match` use `INSERT OR REPLACE`; callers must commit in batches.
 
 **NVD sync** (`scanner/enrichment/nvd_sync.py`):
-- Downloads `nvdcve-1.1-{year}.json.gz` from the NVD legacy feed with a Rich progress bar.
-- Decompresses in memory with `gzip.decompress`, parses JSON, commits every 500 records.
+- Uses the NVD 2.0 REST API (`/rest/json/cves/2.0`); the legacy 1.1 JSON feeds were retired in March 2023.
+- Splits each year into 90-day windows (NVD enforces a 120-day max per request), paginates at 2000 results/page, commits every 500 records.
 - CVSS v3 is preferred; v2 is used as fallback when v3 is absent.
 - Recurses into `configurations.nodes[].children[]` to collect all `cpe_match` entries.
 

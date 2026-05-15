@@ -142,4 +142,38 @@ sudo vuln-scanner scan --target 10.0.0.0/24 --ports 1-1024 --concurrency 200
 
 ## Output Formats
 
-[placeholder — coming in Phase 5]
+### JSON
+
+Every scan automatically saves to the history DB (`~/.vuln-scanner/cve.db`) and can be written to a file:
+
+```bash
+vuln-scanner scan --target 10.0.0.1 --output-json results.json
+```
+
+Structure: `{"meta": {..., "summary": {...}}, "hosts": [...]}`.
+
+### HTML / PDF
+
+Generate reports from a saved scan JSON:
+
+```bash
+vuln-scanner report results.json --output-html report.html
+vuln-scanner report results.json --output-pdf report.pdf
+```
+
+Or produce them directly during a scan:
+
+```bash
+vuln-scanner scan --target 10.0.0.1 --output-html scan.html --output-pdf scan.pdf
+```
+
+The HTML report is fully self-contained (inline CSS, no external resources) and renders in any browser.
+
+### Diff
+
+Compare two scan files (or two labelled history entries) to see new/closed ports and new/resolved CVEs:
+
+```bash
+vuln-scanner diff scan_before.json scan_after.json
+vuln-scanner diff --label-a baseline --label-b weekly
+```

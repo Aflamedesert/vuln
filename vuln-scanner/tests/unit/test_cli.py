@@ -44,16 +44,30 @@ def test_help() -> None:
     assert result.exit_code == 0
 
 
-def test_diff_not_implemented() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["diff", "a.json", "b.json"])
-    assert "[Phase 4]" in result.output
+def test_diff_no_changes() -> None:
+    minimal: dict[str, object] = {"meta": {"scan_started": "2024-01-01T00:00:00"}, "hosts": []}
+    with patch("scanner.reporting.json_report.load_json", return_value=minimal):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["diff", "a.json", "b.json"])
+    assert result.exit_code == 0
+    assert "no port changes" in result.output.lower()
 
 
-def test_report_not_implemented() -> None:
+def test_report_no_flags_exits() -> None:
     runner = CliRunner()
-    result = runner.invoke(cli, ["report", "a.json"])
-    assert "[Phase 5]" in result.output
+    result = runner.invoke(cli, ["report", "scan.json"])
+    assert result.exit_code != 0
+
+
+def test_report_with_html_flag() -> None:
+    minimal: dict[str, object] = {"meta": {"scan_started": "2024-01-01T00:00:00"}, "hosts": []}
+    with (
+        patch("scanner.reporting.json_report.load_json", return_value=minimal),
+        patch("scanner.reporting.html_report.write_html"),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["report", "scan.json", "--output-html", "/tmp/r.html"])
+    assert result.exit_code == 0
 
 
 def test_default_years_returns_two() -> None:
@@ -83,6 +97,7 @@ def test_scan_no_open_ports_no_os() -> None:
     with (
         patch("scanner.cli.scan_host", new_callable=AsyncMock) as mock_scan,
         patch("scanner.cli.fingerprint_os", return_value=(None, 0.0)),
+        patch("scanner.diff.history.save_scan", return_value=1),
     ):
         mock_scan.return_value = scan_result
         runner = CliRunner()
@@ -107,6 +122,7 @@ def test_scan_open_ports_no_db_with_os() -> None:
         patch("scanner.cli.scan_host", new_callable=AsyncMock) as mock_scan,
         patch("scanner.cli.grab_banner", new_callable=AsyncMock) as mock_grab,
         patch("scanner.cli.fingerprint_os", return_value=("Windows", 0.9)),
+        patch("scanner.diff.history.save_scan", return_value=1),
     ):
         mock_scan.return_value = scan_result
         mock_grab.return_value = banner_svc
@@ -153,6 +169,7 @@ def test_scan_with_db_and_cves() -> None:
         patch("scanner.cli.fingerprint_os", return_value=("Linux", 0.9)),
         patch("os.path.exists", return_value=True),
         patch("scanner.enrichment.cve_lookup.enrich_results", return_value=[enriched_result]),
+        patch("scanner.diff.history.save_scan", return_value=1),
     ):
         mock_scan.return_value = scan_result
         mock_grab.return_value = banner_svc
@@ -171,6 +188,7 @@ def test_scan_with_db_no_enriched_services() -> None:
         patch("scanner.cli.fingerprint_os", return_value=("Linux", 0.9)),
         patch("os.path.exists", return_value=True),
         patch("scanner.enrichment.cve_lookup.enrich_results", return_value=[empty_enriched]),
+        patch("scanner.diff.history.save_scan", return_value=1),
     ):
         mock_scan.return_value = scan_result
         runner = CliRunner()

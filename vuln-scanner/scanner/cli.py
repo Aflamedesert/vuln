@@ -2,22 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import cast
 
 import click
 from rich.console import Console
-from rich.panel import Panel
-from rich.status import Status
-from rich.table import Table
 
 from scanner.config import ScanConfig
 from scanner.core.banner_grabber import grab_banner
-from scanner.core.models import EnrichedScanResult, ServiceInfo
+from scanner.core.models import EnrichedScanResult, EnrichedService, ScanResult, ServiceInfo
 from scanner.core.os_fingerprint import fingerprint_os
 from scanner.core.port_scanner import expand_targets, parse_port_range, scan_host
 
 console = Console()
+
+
+def _make_enriched(result: ScanResult) -> EnrichedScanResult:
+    return EnrichedScanResult(
+        scan_result=result,
+        services=[
+            EnrichedService(
+                service=svc,
+                cpe_uri=None,
+                cpe_confidence=0.0,
+                match_method="none",
+                cves=[],
+            )
+            for svc in result.services
+        ],
+    )
 
 
 @click.group()
@@ -47,6 +60,10 @@ def scan(
     output_pdf: str | None,
 ) -> None:
     """Scan a target for open ports and known vulnerabilities."""
+    from scanner.diff.history import save_scan
+    from scanner.reporting.cli_report import print_host_table, print_summary_panel
+    from scanner.reporting.models import build_report
+
     config = ScanConfig(
         target=target,
         ports=ports,
@@ -62,6 +79,9 @@ def scan(
 
     db_path = os.path.expanduser(config.db_path)
     db_exists = os.path.exists(db_path)
+
+    started = datetime.now(UTC)
+    all_enriched: list[EnrichedScanResult] = []
 
     for host in hosts:
         console.rule(f"[bold cyan]Scanning {host}[/bold cyan]")
@@ -82,10 +102,10 @@ def scan(
             banner_map = {svc.port: svc for svc in banners}
             for svc in result.services:
                 if svc.state == "open" and svc.port in banner_map:
-                    enriched = banner_map[svc.port]
-                    svc.banner = enriched.banner
-                    svc.service_guess = enriched.service_guess
-                    svc.version_string = enriched.version_string
+                    enriched_banner = banner_map[svc.port]
+                    svc.banner = enriched_banner.banner
+                    svc.service_guess = enriched_banner.service_guess
+                    svc.version_string = enriched_banner.version_string
 
         # OS fingerprint
         os_guess, os_confidence = fingerprint_os(result.ttl, result.tcp_window)
@@ -93,83 +113,39 @@ def scan(
         result.os_confidence = os_confidence
 
         # CVE enrichment (only when DB exists)
-        enriched_result: EnrichedScanResult | None = None
         if db_exists:
             from scanner.enrichment.cve_lookup import enrich_results
 
             enriched_results = enrich_results([result], config.db_path)
-            enriched_result = enriched_results[0] if enriched_results else None
-
-        # Build results table
-        table = Table(title=f"Port scan — {host}", show_lines=False)
-        table.add_column("Port", style="bold", justify="right")
-        table.add_column("State")
-        table.add_column("Service")
-        table.add_column("Version")
-        table.add_column("CVEs", justify="right")
-        table.add_column("Top Severity")
-
-        state_style = {"open": "green", "closed": "dim", "filtered": "yellow"}
-        severity_style = {
-            "CRITICAL": "bold red",
-            "HIGH": "red",
-            "MEDIUM": "yellow",
-            "LOW": "blue",
-            "NONE": "dim",
-        }
-
-        shown = [s for s in result.services if s.state != "closed"]
-        if not shown:
-            console.print("[dim]No open or filtered ports found.[/dim]")
+            enriched = enriched_results[0] if enriched_results else _make_enriched(result)
         else:
-            enriched_map = (
-                {es.service.port: es for es in enriched_result.services}
-                if enriched_result
-                else {}
-            )
-            for svc in shown:
-                style = state_style.get(svc.state, "")
-                esvc = enriched_map.get(svc.port)
-                cve_count = len(esvc.cves) if esvc else 0
-                top_sev = ""
-                if esvc and esvc.cves:
-                    top_sev = esvc.cves[0].severity or ""
-                sev_style = severity_style.get(top_sev, "")
-                table.add_row(
-                    str(svc.port),
-                    f"[{style}]{svc.state}[/{style}]",
-                    svc.service_guess or "",
-                    svc.version_string or "",
-                    str(cve_count) if cve_count else "",
-                    f"[{sev_style}]{top_sev}[/{sev_style}]" if top_sev else "",
-                )
-            console.print(table)
+            enriched = _make_enriched(result)
 
-        # Summary panel
-        summary_lines: list[str] = []
+        all_enriched.append(enriched)
+        print_host_table(enriched, console)
 
-        if os_guess:
-            os_text = f"[bold]{os_guess}[/bold]  (confidence: {os_confidence:.0%})"
-            if result.ttl is not None:
-                os_text += f"   TTL={result.ttl}"
-            if result.tcp_window is not None:
-                os_text += f"   Window={result.tcp_window}"
-        else:
-            os_text = "[dim]Could not determine OS.[/dim]"
-        summary_lines.append(os_text)
+    finished = datetime.now(UTC)
+    report = build_report(config.target, started, finished, all_enriched)
+    save_scan(config.db_path, report)
+    print_summary_panel(report, console)
 
-        if enriched_result:
-            all_cves = [c for es in enriched_result.services for c in es.cves]
-            critical = sum(1 for c in all_cves if (c.severity or "").upper() == "CRITICAL")
-            high = sum(1 for c in all_cves if (c.severity or "").upper() == "HIGH")
-            if all_cves:
-                summary_lines.append(
-                    f"CVEs found: [bold]{len(all_cves)}[/bold]  "
-                    f"[bold red]CRITICAL: {critical}[/bold red]  "
-                    f"[red]HIGH: {high}[/red]"
-                )
+    if config.output_json:
+        from scanner.reporting.json_report import write_json
 
-        console.print(Panel("\n".join(summary_lines), title="Summary", expand=False))
+        write_json(report, config.output_json)
+        console.print(f"[green]JSON saved:[/green] {config.output_json}")
+
+    if config.output_html:
+        from scanner.reporting.html_report import write_html
+
+        write_html(report, config.output_html)
+        console.print(f"[green]HTML saved:[/green] {config.output_html}")
+
+    if config.output_pdf:
+        from scanner.reporting.pdf_report import write_pdf
+
+        write_pdf(report, config.output_pdf)
+        console.print(f"[green]PDF saved:[/green] {config.output_pdf}")
 
 
 @cli.command("sync-db")
@@ -181,6 +157,8 @@ def scan(
 )
 def sync_db(db_path: str, years: tuple[int, ...]) -> None:
     """Download and cache NVD CVE data locally."""
+    from rich.status import Status
+
     from scanner.enrichment.nvd_sync import sync_nvd
 
     year_list: list[int] = list(years) if years else _default_years()
@@ -200,18 +178,46 @@ def _default_years() -> list[int]:
 
 
 @cli.command()
-@click.argument("scan_a", type=click.Path(exists=False))
-@click.argument("scan_b", type=click.Path(exists=False))
+@click.argument("scan_a", default=None, required=False)
+@click.argument("scan_b", default=None, required=False)
+@click.option("--label-a", default=None, help="Load first scan from history by label.")
+@click.option("--label-b", default=None, help="Load second scan from history by label.")
 @click.option("--output-json", default=None, help="Write diff JSON to this path.")
 @click.option("--output-html", default=None, help="Write diff HTML report to this path.")
+@click.option("--db-path", default="~/.vuln-scanner/cve.db", show_default=True, hidden=True)
 def diff(
-    scan_a: str,
-    scan_b: str,
+    scan_a: str | None,
+    scan_b: str | None,
+    label_a: str | None,
+    label_b: str | None,
     output_json: str | None,
     output_html: str | None,
+    db_path: str,
 ) -> None:
     """Compare two scan result files and report changes."""
-    click.echo("[Phase 4] not yet implemented")
+    from scanner.diff.engine import diff_scans, print_diff_report
+    from scanner.diff.history import load_scan_by_label
+    from scanner.reporting.json_report import load_json
+
+    if label_a and label_b:
+        data_a = load_scan_by_label(db_path, label_a)
+        data_b = load_scan_by_label(db_path, label_b)
+    elif scan_a and scan_b:
+        data_a = load_json(scan_a)
+        data_b = load_json(scan_b)
+    else:
+        console.print("[red]Provide two file paths or --label-a / --label-b.[/red]")
+        raise SystemExit(1)
+
+    diff_report = diff_scans(data_a, data_b)
+    print_diff_report(diff_report, console)
+
+    if output_json:
+        import dataclasses
+        import json as _json
+        with open(output_json, "w", encoding="utf-8") as f:
+            _json.dump(dataclasses.asdict(diff_report), f, indent=2)
+        console.print(f"[green]Diff JSON saved:[/green] {output_json}")
 
 
 @cli.command()
@@ -224,4 +230,22 @@ def report(
     output_pdf: str | None,
 ) -> None:
     """Generate a human-readable report from a saved scan JSON."""
-    click.echo("[Phase 5] not yet implemented")
+    from scanner.reporting.json_report import load_json
+
+    if not output_html and not output_pdf:
+        console.print("[yellow]Specify --output-html and/or --output-pdf.[/yellow]")
+        raise SystemExit(1)
+
+    data = load_json(scan_json)
+
+    if output_html:
+        from scanner.reporting.html_report import write_html
+
+        write_html(data, output_html)
+        console.print(f"[green]HTML saved:[/green] {output_html}")
+
+    if output_pdf:
+        from scanner.reporting.pdf_report import write_pdf
+
+        write_pdf(data, output_pdf)
+        console.print(f"[green]PDF saved:[/green] {output_pdf}")
