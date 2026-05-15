@@ -177,3 +177,4 @@ Compare two scan files (or two labelled history entries) to see new/closed ports
 vuln-scanner diff scan_before.json scan_after.json
 vuln-scanner diff --label-a baseline --label-b weekly
 ```
+
