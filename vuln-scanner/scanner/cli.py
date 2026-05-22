@@ -61,6 +61,7 @@ def scan(
 ) -> None:
     """Scan a target for open ports and known vulnerabilities."""
     from scanner.diff.history import save_scan
+    from scanner.plugins.base import discover_plugins
     from scanner.reporting.cli_report import print_host_table, print_summary_panel
     from scanner.reporting.models import build_report
 
@@ -76,6 +77,7 @@ def scan(
 
     port_list = parse_port_range(config.ports)
     hosts = expand_targets(config.target)
+    plugins = discover_plugins()
 
     db_path = os.path.expanduser(config.db_path)
     db_exists = os.path.exists(db_path)
@@ -121,6 +123,16 @@ def scan(
         else:
             enriched = _make_enriched(result)
 
+        # Run plugins on each open service
+        for es in enriched.services:
+            if es.service.state == "open":
+                for plugin in plugins:
+                    if plugin.applies_to(es.service):
+                        try:
+                            es.plugin_findings.extend(plugin.run(es.service, host))
+                        except Exception:
+                            pass
+
         all_enriched.append(enriched)
         print_host_table(enriched, console)
 
@@ -155,7 +167,8 @@ def scan(
 @click.option(
     "--year", "years", multiple=True, type=int, help="NVD year feed(s) to sync (repeatable)."
 )
-def sync_db(db_path: str, years: tuple[int, ...]) -> None:
+@click.option("--epss", is_flag=True, default=False, help="Also download EPSS exploit scores.")
+def sync_db(db_path: str, years: tuple[int, ...], epss: bool) -> None:
     """Download and cache NVD CVE data locally."""
     from rich.status import Status
 
@@ -170,6 +183,14 @@ def sync_db(db_path: str, years: tuple[int, ...]) -> None:
     console.print(
         f"[green]Sync complete.[/green] Stored [bold]{record_count:,}[/bold] CVE records."
     )
+
+    if epss:
+        from scanner.enrichment.epss import fetch_epss
+
+        epss_count = fetch_epss(db_path)
+        console.print(
+            f"[green]EPSS sync complete.[/green] Stored [bold]{epss_count:,}[/bold] EPSS scores."
+        )
 
 
 def _default_years() -> list[int]:

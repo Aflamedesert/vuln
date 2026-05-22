@@ -32,6 +32,7 @@ def print_host_table(result: EnrichedScanResult, console: Console) -> None:
     table.add_column("Version")
     table.add_column("CVEs", justify="right")
     table.add_column("Top CVSS", justify="right")
+    table.add_column("EPSS", justify="right")
     table.add_column("Severity")
 
     shown = [es for es in result.services if es.service.state != "closed"]
@@ -43,6 +44,7 @@ def print_host_table(result: EnrichedScanResult, console: Console) -> None:
         svc = es.service
         cve_count = len(es.cves)
         top_cvss = ""
+        top_epss = ""
         top_sev = ""
         sev_style = ""
         if es.cves:
@@ -50,15 +52,43 @@ def print_host_table(result: EnrichedScanResult, console: Console) -> None:
             top_cvss = f"{top.cvss_score:.1f}" if top.cvss_score is not None else ""
             top_sev = top.severity or ""
             sev_style = _SEVERITY_STYLE.get(top_sev, "")
+            if top.epss_probability is not None and top.epss_percentile is not None:
+                pct = int(top.epss_percentile * 100)
+                top_epss = f"{top.epss_probability:.3f} ({pct}th)"
         table.add_row(
             str(svc.port),
             svc.service_guess or "",
             svc.version_string or "",
             str(cve_count) if cve_count else "",
             top_cvss,
+            top_epss,
             f"[{sev_style}]{top_sev}[/{sev_style}]" if sev_style and top_sev else top_sev,
         )
 
+    console.print(table)
+    _print_plugin_table(result, console)
+
+
+def _print_plugin_table(result: EnrichedScanResult, console: Console) -> None:
+    rows = [
+        (es.service.port, pf)
+        for es in result.services
+        if es.service.state == "open"
+        for pf in es.plugin_findings
+    ]
+    if not rows:
+        return
+    host = result.scan_result.host
+    table = Table(title=f"Plugin findings — {host}", show_lines=False)
+    table.add_column("Port", style="bold", justify="right")
+    table.add_column("Plugin")
+    table.add_column("Finding")
+    table.add_column("Evidence")
+    for port, pf in rows:
+        sev = pf.severity.upper()
+        style = _SEVERITY_STYLE.get(sev, "")
+        badge = f"[{style}][{sev}][/{style}]" if style else f"[{sev}]"
+        table.add_row(str(port), pf.plugin_name, f"{badge} {pf.title}", pf.evidence or "")
     console.print(table)
 
 

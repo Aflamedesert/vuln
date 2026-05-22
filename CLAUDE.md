@@ -20,6 +20,8 @@ uv run pytest path/to/test_file.py::test_name
 
 ### Scanner package (vuln-scanner/)
 
+All commands below must be run from the `vuln-scanner/` directory.
+
 ```bash
 # Install (requires libpcap-dev and tcpdump on Linux)
 pip install -e ".[dev]"
@@ -64,7 +66,7 @@ Entry point: `scanner/cli.py` (Click group) → `scanner/config.py` (`ScanConfig
 
 ## Testing
 
-Tests live in `vuln-scanner/tests/`. The suite is split into `unit/` (no network, no raw sockets) and `integration/` (spins up a local TCP echo server on `127.0.0.1:19922`).
+Tests live in `vuln-scanner/tests/` (run from `vuln-scanner/`). The suite is split into `unit/` (no network, no raw sockets) and `integration/` (spins up a local TCP echo server on `127.0.0.1:19922`).
 
 Key shared fixtures in `tests/conftest.py`:
 - `mem_db` — in-memory SQLite with full schema
@@ -82,3 +84,4 @@ CI (`.github/workflows/test.yml`) runs on every push and PR: installs `libpcap-d
 | 3 | CVE enrichment (NVD sync, CPE match, CVSS) | Done |
 | 4 | Full test suite + CI workflow | Done |
 | 5 | Reporting engine + diff + scan history | Done |
+| 6 | (next) | Planned |

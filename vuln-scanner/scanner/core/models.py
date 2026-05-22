@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scanner.plugins.base import PluginFinding
 
 
 @dataclass
@@ -33,6 +37,8 @@ class CVEMatch:
     cvss_score: float | None
     severity: str | None
     published: str | None
+    epss_probability: float | None = None
+    epss_percentile: float | None = None
 
 
 @dataclass
@@ -42,6 +48,7 @@ class EnrichedService:
     cpe_confidence: float
     match_method: str
     cves: list[CVEMatch] = field(default_factory=list)
+    plugin_findings: list[PluginFinding] = field(default_factory=list)
 
 
 @dataclass

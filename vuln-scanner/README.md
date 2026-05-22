@@ -1,180 +1,201 @@
 # vuln-scanner
 
-A portfolio-grade Python network vulnerability scanner with CVE enrichment, diff tracking, and multi-format reporting.
+A network vulnerability scanner written in Python — raw TCP SYN probes via Scapy, async banner grabbing, offline CVE enrichment from the full NVD dataset, EPSS exploit scoring, a drop-in plugin system, and JSON/HTML/PDF reporting. No nmap. No subprocess wrappers.
 
-> **Ethical Use Warning**: This tool is intended for use only on networks and systems you own or have explicit written permission to test. Unauthorized scanning is illegal and unethical. The authors accept no responsibility for misuse.
+![Demo placeholder — replace with asciinema export](docs/demo.gif)
 
 ---
 
-## Prerequisites
+## What makes this non-trivial
 
-- Docker and Docker Compose (recommended)
-- OR: Python 3.11+, `libpcap-dev`, `tcpdump`, and `CAP_NET_RAW` capability
+Most "scanners" shell out to nmap and parse its XML output. This one doesn't.
+
+- **Raw SYN probes** — Scapy sends crafted TCP SYN packets and reads the response flags directly, giving access to TTL and window size for OS fingerprinting. Falls back to `socket.connect_ex` automatically when `CAP_NET_RAW` is unavailable.
+- **Offline CVE database** — The NVD 2.0 REST API has a 5 req/30 s rate limit and thousands of pages per year. Instead of hitting it live, `sync-db` caches the entire dataset in a local SQLite file (~500 k CVEs) with indexed CPE lookups that resolve in under 1 ms.
+- **CPE banner matching** — Mapping a free-text banner like `"Apache/2.4.52 (Ubuntu)"` to a NVD CPE URI requires a three-stage pipeline: banner normalisation → vendor/product/version extraction → exact / alias / prefix DB lookup, each with a confidence score.
+- **EPSS prioritisation** — CVSS measures how bad a vulnerability *could* be; EPSS measures how likely it is to be exploited *this month*. Both scores appear side by side so triage decisions can be evidence-based.
+- **Plugin architecture** — Drop a file into `scanner/plugins/` and it is discovered automatically at runtime via `pkgutil`; no registration step. Two plugins ship built-in: HTTP security-header checks and TLS/certificate inspection.
+
+---
+
+## Features
+
+| | |
+|---|---|
+| Scapy SYN scan + TCP-connect fallback | OS fingerprint (TTL + TCP window) |
+| Async banner grabbing — SSH, HTTP/S, FTP, SMTP, MySQL | Version string extraction per protocol |
+| NVD 2.0 offline sync — CVSS v3/v2, CPE range matching | EPSS daily exploit-probability scores |
+| Drop-in plugin system | HTTP security-header plugin |
+| TLS version + cert expiry + self-signed plugin | Scan diff (ports, CVEs, labels) |
+| Rich CLI tables | JSON, self-contained HTML, PDF reports |
+| SQLite scan history | ≥ 80% test coverage, strict mypy, ruff |
+
+---
 
 ## Quick Start
 
 ```bash
-# Build and start the scanner container
+# Recommended: run in Docker (handles CAP_NET_RAW automatically)
 docker compose build
+docker compose run scanner vuln-scanner scan --target 192.168.1.0/24 --ports 22,80,443
 
-# Run a scan against the bundled target
-docker compose run scanner vuln-scanner scan --target 172.16.0.0/24
-
-# Start the vulnerable target for local testing
-docker compose up target
-```
-
-## Development Setup
-
-```bash
-# Create a virtual environment and install with dev extras
-python -m venv .venv
-source .venv/bin/activate
+# Or install locally (needs libpcap-dev + tcpdump on Linux)
 pip install -e ".[dev]"
-
-# Lint
-ruff check scanner/
-
-# Type check
-mypy scanner/
-
-# Tests
-pytest --cov=scanner
+vuln-scanner scan --target 127.0.0.1 --ports 8000-8080   # TCP-connect, no root needed
 ```
-
-## Development
-
-Install the package in editable mode with all dev dependencies:
-
-```bash
-pip install -e ".[dev]"
-```
-
-### Running tests
-
-```bash
-# Full suite with coverage report
-pytest tests/ --cov=scanner --cov-report=term-missing -v
-
-# Unit tests only
-pytest tests/unit/ -v
-
-# Integration tests only (starts a local echo server on 127.0.0.1:19922)
-pytest tests/integration/ -v
-
-# Run a single test file
-pytest tests/unit/test_os_fingerprint.py -v
-
-# Coverage gate — must be >= 80%
-pytest tests/ --cov=scanner --cov-report=xml && \
-  python -c "
-import xml.etree.ElementTree as ET
-r = float(ET.parse('coverage.xml').getroot().get('line-rate', 0))
-print(f'Coverage: {r*100:.1f}%')
-assert r >= 0.80, f'Below 80% gate ({r*100:.1f}%)'
-"
-```
-
-### Lint + type-check
-
-```bash
-ruff check scanner/ && mypy scanner/
-```
-
-### CI
-
-The GitHub Actions workflow (`.github/workflows/test.yml`) runs on every push and pull request:
-1. Installs `libpcap-dev` and `pip install -e ".[dev]"`
-2. Runs `pytest tests/ --cov=scanner --cov-report=xml -v`
-3. Enforces the ≥ 80% coverage gate
-4. Uploads results to Codecov
 
 ---
 
-## Architecture
+## How it works
 
-The scanner is composed of three cooperating layers:
+```
+vuln-scanner scan
+ ├─ scan_host()          port_scanner.py   Scapy SYN → TCP-connect fallback, async semaphore
+ ├─ grab_banner()        banner_grabber.py asyncio.open_connection, protocol-specific probes
+ ├─ fingerprint_os()     os_fingerprint.py TTL + TCP window table lookup
+ ├─ enrich_results()     cve_lookup.py     CPE match → version range filter → CVEMatch list
+ │    ├─ match_banner()  cpe_matcher.py    normalise → extract → exact/alias/prefix lookup
+ │    └─ get_epss_score() epss.py          SQLite lookup, most-recent score_date
+ ├─ discover_plugins()   plugins/base.py   pkgutil discovery, BasePlugin ABC
+ │    ├─ HttpHeadersPlugin               HEAD request, 4 header checks
+ │    └─ SSLCheckPlugin                  2-connection TLS version + cert checks
+ └─ build_report()       reporting/        ScanReport → JSON / Jinja2 HTML / WeasyPrint PDF
+```
 
-1. **Port scanner** (`scanner/core/port_scanner.py`) — async wrapper around Scapy SYN probes, with automatic TCP-connect fallback when `CAP_NET_RAW` is unavailable.
-2. **Banner grabber** (`scanner/core/banner_grabber.py`) — `asyncio.open_connection` probes per open port with protocol-specific parsing (FTP, SSH, SMTP, HTTP/S, MySQL, generic).
-3. **OS fingerprinter** (`scanner/core/os_fingerprint.py`) — TTL + TCP-window table lookup returning an OS guess and confidence score.
+Data flows one way. Nothing outside `cli.py` has side effects; every layer is independently testable.
 
-Results flow: `cli.scan` → `scan_host` → `grab_banner` (per open port) → `fingerprint_os` → Rich table.
+---
 
 ## Usage
 
-```bash
-# Scan localhost high ports (no root needed — TCP connect fallback)
-vuln-scanner scan --target 127.0.0.1 --ports 8000-8080
-
-# SYN scan a subnet (requires CAP_NET_RAW / root or Docker)
-sudo vuln-scanner scan --target 192.168.1.0/24 --ports 22,80,443,3306
-
-# Scan with custom timeout and concurrency
-vuln-scanner scan -t 10.0.0.1 -p 1-1024 --timeout 1.5 --concurrency 200
-
-# Save results for later diffing / reporting (Phase 3+)
-vuln-scanner scan -t 10.0.0.1 --output-json results.json
-```
-
-## CVE Database
+### Scan
 
 ```bash
-# Sync NVD feeds for the last two years (default)
-vuln-scanner sync-db
-
-# Sync a specific year
-vuln-scanner sync-db --year 2021
-
-# Use a custom database path
-vuln-scanner sync-db --db-path /opt/scanner/cve.db
-```
-
-After syncing, `scan` automatically enriches results with CVE counts and severity:
-
-```bash
-# Scan and show CVE matches alongside port results
 vuln-scanner scan --target 192.168.1.10 --ports 22,80,443,3306
-
-# Full subnet scan with CVE enrichment
-sudo vuln-scanner scan --target 10.0.0.0/24 --ports 1-1024 --concurrency 200
+vuln-scanner scan --target 10.0.0.0/24  --ports 1-1024 --concurrency 200 --timeout 1.5 \
+    --output-json results.json --output-html report.html --output-pdf report.pdf
 ```
 
-## Output Formats
-
-### JSON
-
-Every scan automatically saves to the history DB (`~/.vuln-scanner/cve.db`) and can be written to a file:
+### Sync CVE + EPSS data
 
 ```bash
-vuln-scanner scan --target 10.0.0.1 --output-json results.json
+vuln-scanner sync-db                  # NVD last two years
+vuln-scanner sync-db --epss           # also pull today's EPSS scores
+vuln-scanner sync-db --year 2021 --year 2022
 ```
 
-Structure: `{"meta": {..., "summary": {...}}, "hosts": [...]}`.
-
-### HTML / PDF
-
-Generate reports from a saved scan JSON:
+### Diff two scans
 
 ```bash
-vuln-scanner report results.json --output-html report.html
-vuln-scanner report results.json --output-pdf report.pdf
+vuln-scanner diff before.json after.json
+vuln-scanner diff --label-a baseline --label-b weekly --output-html delta.html
 ```
 
-Or produce them directly during a scan:
+### Report from saved JSON
 
 ```bash
-vuln-scanner scan --target 10.0.0.1 --output-html scan.html --output-pdf scan.pdf
+vuln-scanner report results.json --output-html report.html --output-pdf report.pdf
 ```
 
-The HTML report is fully self-contained (inline CSS, no external resources) and renders in any browser.
+---
 
-### Diff
+## EPSS Scores
 
-Compare two scan files (or two labelled history entries) to see new/closed ports and new/resolved CVEs:
+[EPSS (Exploit Prediction Scoring System)](https://www.first.org/epss/) is a daily ML model
+that estimates the probability a CVE will be exploited in the wild within 30 days.
+
+**Why it matters:** a CVE with CVSS 9.8 and EPSS 0.003 is less immediately urgent than one
+with CVSS 7.5 and EPSS 0.975. EPSS surfaces the 2–5% of CVEs worth patching first.
+
+After `vuln-scanner sync-db --epss`, every CVE match shows an EPSS probability and percentile
+in the CLI table (`0.975 (99th)`) and as a badge in the HTML report.
+
+---
+
+## Plugins
+
+Plugins run after CVE enrichment. Findings surface in the CLI table, JSON (`plugin_findings`),
+HTML, and PDF.
+
+### Built-in plugins
+
+| Plugin | Trigger | Findings |
+|---|---|---|
+| `http-headers` | `service_guess` is `http` or `https` | Missing XFO (MEDIUM), CSP (MEDIUM), XCTO (LOW), HSTS on HTTPS (HIGH) |
+| `ssl-check` | Port 443/8443 or `service_guess == "https"` | Weak TLS <1.2 (MEDIUM), cert expiring ≤30 d (HIGH), expired (CRITICAL), self-signed (LOW) |
+
+### Writing a plugin
+
+Create `scanner/plugins/my_plugin.py` — it is discovered automatically:
+
+```python
+from scanner.core.models import ServiceInfo
+from scanner.plugins.base import BasePlugin, PluginFinding
+
+class MyPlugin(BasePlugin):
+    name = "my-plugin"
+    description = "Checks for a custom condition."
+
+    def applies_to(self, service: ServiceInfo) -> bool:
+        return service.port == 8080
+
+    def run(self, service: ServiceInfo, host: str) -> list[PluginFinding]:
+        return [
+            PluginFinding(
+                plugin_name=self.name,
+                title="Issue title",
+                description="Explanation.",
+                severity="HIGH",       # CRITICAL | HIGH | MEDIUM | LOW
+                evidence="detail",     # optional
+            )
+        ]
+```
+
+### Adding a CPE vendor alias
+
+Banner says "Jetty" but NVD says "eclipse"? Add one line to `_ALIASES` in
+`scanner/enrichment/cpe_matcher.py`:
+
+```python
+"jetty": "eclipse",
+```
+
+---
+
+## Development
 
 ```bash
-vuln-scanner diff scan_before.json scan_after.json
-vuln-scanner diff --label-a baseline --label-b weekly
+pip install -e ".[dev]"
+
+# Tests (unit only — no network, no raw sockets)
+pytest tests/unit/ -v
+
+# Full suite + coverage (gate: ≥ 80%)
+pytest tests/ --cov=scanner --cov-report=term-missing -v
+
+# Lint + types
+ruff check scanner/ && mypy scanner/
 ```
 
+CI runs on every push: installs `libpcap-dev`, runs the full suite, enforces the coverage gate,
+uploads to Codecov.
+
+---
+
+## Technical write-up
+
+Design decisions, the CPE matching problem, known limitations, and what I would improve next:
+[**docs/write-up.md**](docs/write-up.md).
+
+---
+
+## Ethical Use
+
+For **authorised testing only** — hosts and networks you own or have explicit written permission
+to test. Unauthorised port scanning may be illegal in your jurisdiction.
+
+---
+
+## License
+
+MIT

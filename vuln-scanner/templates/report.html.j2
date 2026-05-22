@@ -76,6 +76,13 @@
   .cve-list li { margin-bottom: 0.2rem; }
   .cve-id { font-family: monospace; }
   .cvss-score { color: var(--muted); margin-left: 0.35rem; }
+  .epss-badge { background: #1e1b4b; color: #a5b4fc; font-family: monospace; font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 3px; margin-left: 0.35rem; }
+
+  /* Plugin findings */
+  .plugin-list { list-style: none; font-size: 0.8rem; }
+  .plugin-list li { margin-bottom: 0.2rem; }
+  .plugin-name { color: var(--muted); font-size: 0.75rem; margin-left: 0.35rem; }
+  .plugin-evidence { color: var(--muted); font-family: monospace; margin-left: 0.35rem; }
 
   /* Confidence badge */
   .confidence { font-size: 0.7rem; color: var(--muted); font-family: monospace; }
@@ -160,6 +167,7 @@
             <th>Version</th>
             <th>CPE</th>
             <th>CVEs</th>
+            <th>Plugin Findings</th>
           </tr>
         </thead>
         <tbody>
@@ -188,6 +196,21 @@
                   <span class="badge badge-{{ cve.severity or 'NONE' }}">{{ cve.severity or 'N/A' }}</span>
                   <a class="cve-id" href="https://nvd.nist.gov/vuln/detail/{{ cve.cve_id }}" target="_blank" rel="noopener">{{ cve.cve_id }}</a>
                   {% if cve.cvss_score is not none %}<span class="cvss-score">{{ cve.cvss_score }}</span>{% endif %}
+                  {% if cve.epss_probability is not none %}<span class="epss-badge">EPSS {{ "%.3f"|format(cve.epss_probability) }} ({{ (cve.epss_percentile * 100)|int }}th)</span>{% endif %}
+                </li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+            </td>
+            <td>
+              {% if es.plugin_findings %}
+              <ul class="plugin-list">
+                {% for pf in es.plugin_findings %}
+                <li>
+                  <span class="badge badge-{{ pf.severity }}">{{ pf.severity }}</span>
+                  {{ pf.title }}
+                  <span class="plugin-name">{{ pf.plugin_name }}</span>
+                  {% if pf.evidence %}<span class="plugin-evidence">{{ pf.evidence }}</span>{% endif %}
                 </li>
                 {% endfor %}
               </ul>

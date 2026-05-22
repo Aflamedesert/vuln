@@ -23,8 +23,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `scanner/core/` | Port scanning engine (TCP SYN/connect), service fingerprinting |
 | `scanner/enrichment/` | NVD CVE lookup and local SQLite cache (`cve.db`) |
 | `scanner/reporting/` | Jinja2 → HTML and WeasyPrint → PDF report generation |
-| `scanner/diff/` | Structural diff between two scan JSON files |
-| `scanner/plugins/` | Optional scanner plugins (future extension point) |
+| `scanner/diff/engine.py` | `diff_scans` — structural diff between two scan JSON files |
+| `scanner/diff/history.py` | SQLite scan history (`scan_history` table in CVE DB) |
+| `scanner/reporting/models.py` | `ScanReport` dataclass + `build_report` aggregator |
+| `scanner/reporting/json_report.py` | JSON serialization/deserialization of `ScanReport` |
+| `scanner/reporting/cli_report.py` | Rich console tables/panels |
+| `scanner/reporting/html_report.py` | Jinja2 → HTML via `templates/report.html.j2` |
+| `scanner/reporting/pdf_report.py` | WeasyPrint → PDF from rendered HTML |
+| `scanner/plugins/base.py` | `PluginFinding` dataclass, `BasePlugin` ABC, `discover_plugins()` runtime discovery |
+| `scanner/plugins/http_headers.py` | Checks missing HTTP security headers (XFO, CSP, XCTO, HSTS) |
+| `scanner/plugins/ssl_check.py` | Checks weak TLS version, cert expiry, self-signed cert |
+| `scanner/enrichment/epss.py` | Downloads EPSS CSV.GZ, upserts into `epss_scores` table, `get_epss_score()` |
 
 ## Running Locally
 
@@ -104,7 +113,9 @@ tests/
 │   ├── test_nvd_sync.py         _parse_cve, _parse_cpe_matches, _date_windows, sync_nvd
 │   ├── test_os_fingerprint.py   TTL+window, TTL-only, window-only, unknown
 │   ├── test_port_scanner.py     parse_port_range, expand_targets, _tcp_connect_probe
-│   └── test_version_range.py    version_in_range boundary cases
+│   ├── test_version_range.py    version_in_range boundary cases
+│   ├── test_diff_engine.py      diff_scans structural diff cases
+│   └── test_json_report.py      ScanReport serialization round-trips
 └── integration/
     ├── test_db_sync.py           create_tables idempotency, upsert CVE/CPE
     └── test_scan_pipeline.py     live echo server at 127.0.0.1:19922
@@ -139,8 +150,40 @@ pytest tests/integration/ -v
 - **nvd_sync tests** patch `_fetch_page` to return canned JSON; `time.sleep` is also patched to keep tests fast.
 - **Integration tests** start a real `socket.socket` echo server in a background thread; `scan_host` and `grab_banner` hit it via TCP connect (no `CAP_NET_RAW` required).
 
+## Plugin System
+
+Plugins live in `scanner/plugins/`. `discover_plugins()` in `base.py` uses `pkgutil.iter_modules` to find every module in that package (excluding `base` itself), imports it, and collects concrete `BasePlugin` subclasses.
+
+**Contract for a valid plugin:**
+- Define `name: str` and `description: str` as class attributes.
+- Implement `applies_to(service: ServiceInfo) -> bool` — called for every open service; return `True` to opt in.
+- Implement `run(service: ServiceInfo, host: str) -> list[PluginFinding]` — called only when `applies_to` returned `True`; must not raise (exceptions are swallowed by the CLI runner and logged as warnings).
+- Place the file in `scanner/plugins/<name>.py`; no registration step is needed.
+
+**`PluginFinding` fields:** `plugin_name`, `title`, `description`, `severity` (one of `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`), `evidence` (optional string).
+
+**Circular import guard:** `PluginFinding` is in `plugins/base.py` which imports `ServiceInfo` from `core/models.py`. `EnrichedService` (in `core/models.py`) has a `plugin_findings: list[PluginFinding]` field. The circular import is broken with a `TYPE_CHECKING` guard — safe because `from __future__ import annotations` makes all annotations lazy strings never evaluated at runtime.
+
+## EPSS Scoring
+
+`scanner/enrichment/epss.py` downloads the daily EPSS CSV.GZ from `https://epss.cyentia.com/epss_scores-current.csv.gz`. The CSV has columns `cve,epss,percentile` (with a leading `#metadata` comment line) and is upserted into the `epss_scores` table with PK `(cve_id, score_date)`.
+
+- `fetch_epss(db_path)` — downloads, decompresses, parses, and upserts; shows a Rich progress bar; returns row count.
+- `get_epss_score(cve_id, conn)` — returns `(probability, percentile)` or `None`; always picks the most recent `score_date` if multiple exist.
+- Called from `cve_lookup.enrich_service` after each `CVEMatch` is built; populates `CVEMatch.epss_probability` and `CVEMatch.epss_percentile`.
+- Activated via `vuln-scanner sync-db --epss`.
+
 ## Known Constraints
 
 - Raw socket operations (`scan`) require `CAP_NET_RAW`. Run inside Docker (`docker compose run scanner …`) or with `sudo` locally.
 - `sync-db` writes to `~/.vuln-scanner/cve.db` by default; the directory must be writable.
 - `weasyprint` has system-level font/CSS dependencies; the Dockerfile installs them via `libpcap-dev` and `tcpdump` (additional GTK/Pango deps may be needed for full PDF support in later phases).
+
+## Known Limitations & Future Work
+
+- **UDP scanning** — only TCP is supported. DNS (53), SNMP (161/162), and NTP (123) are not scanned.
+- **CPE matching accuracy** — the regex extraction + alias pipeline is brittle for unusual vendor names or non-standard banner strings. An embedding-based matcher would improve true positive rates.
+- **Version range edge cases** — `version_in_range` splits on `.` and compares tuples; it mishandles pre-release suffixes (e.g. `1.0.0-rc1`). Switch to `packaging.version.Version` when precision matters.
+- **Serial plugin execution** — plugins run one at a time per service. Wrapping the runner in `asyncio.gather` with a concurrency semaphore would speed up scans against targets with many TLS/HTTP services.
+- **Plugin findings not diffed** — the diff engine compares CVEs and ports but ignores `plugin_findings`. Extending `DiffReport` to include plugin-finding deltas would make change tracking more useful.
+- **No authentication support** — the scanner has no mechanism to supply credentials to authenticated services (SSH, SNMP v3, HTTP Basic). Authenticated scanning could surface additional vulnerabilities not visible from the outside.

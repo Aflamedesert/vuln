@@ -23,6 +23,7 @@ def test_get_db_creates_file_and_schema(tmp_path: object) -> None:
     assert "cves" in tables
     assert "cpe_matches" in tables
     assert "sync_log" in tables
+    assert "epss_scores" in tables
     conn.close()
 
     assert (db_dir / "cve.db").exists()

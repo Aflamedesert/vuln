@@ -82,6 +82,27 @@ def test_enrich_service_version_outside_range(mem_db: sqlite3.Connection) -> Non
     assert enriched.cves == []
 
 
+def test_enrich_populates_epss_when_present(sample_cve: sqlite3.Connection) -> None:
+    sample_cve.execute(
+        "INSERT INTO epss_scores (cve_id, probability, percentile, score_date) VALUES (?, ?, ?, ?)",
+        ("CVE-2021-44228", 0.97530, 0.99800, "2024-01-01"),
+    )
+    sample_cve.commit()
+    svc = _make_service(banner="Apache Log4j 2.14.1")
+    enriched = enrich_service(svc, sample_cve)
+    match = next(c for c in enriched.cves if c.cve_id == "CVE-2021-44228")
+    assert match.epss_probability == pytest.approx(0.97530)
+    assert match.epss_percentile == pytest.approx(0.99800)
+
+
+def test_enrich_epss_none_when_absent(sample_cve: sqlite3.Connection) -> None:
+    svc = _make_service(banner="Apache Log4j 2.14.1")
+    enriched = enrich_service(svc, sample_cve)
+    match = next(c for c in enriched.cves if c.cve_id == "CVE-2021-44228")
+    assert match.epss_probability is None
+    assert match.epss_percentile is None
+
+
 def test_enrich_results_uses_real_db(tmp_path: object) -> None:
     from scanner.enrichment.db import _create_schema, upsert_cpe_match, upsert_cve
     from scanner.enrichment.cve_lookup import enrich_results

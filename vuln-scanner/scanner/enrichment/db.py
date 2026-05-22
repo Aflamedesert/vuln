@@ -44,6 +44,14 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             synced_at    TEXT,
             record_count INTEGER
         );
+
+        CREATE TABLE IF NOT EXISTS epss_scores (
+            cve_id      TEXT,
+            probability REAL,
+            percentile  REAL,
+            score_date  TEXT,
+            PRIMARY KEY (cve_id, score_date)
+        );
         """
     )
     conn.commit()

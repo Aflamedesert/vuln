@@ -11,6 +11,7 @@ from scanner.core.models import (
 )
 from scanner.enrichment.cpe_matcher import match_banner, version_in_range
 from scanner.enrichment.db import get_db
+from scanner.enrichment.epss import get_epss_score
 
 
 def enrich_service(service: ServiceInfo, conn: sqlite3.Connection) -> EnrichedService:
@@ -49,6 +50,7 @@ def enrich_service(service: ServiceInfo, conn: sqlite3.Connection) -> EnrichedSe
                 (cve_id,),
             ).fetchone()
             if cve_row:
+                epss = get_epss_score(cve_row[0], conn)
                 cves.append(
                     CVEMatch(
                         cve_id=cve_row[0],
@@ -56,6 +58,8 @@ def enrich_service(service: ServiceInfo, conn: sqlite3.Connection) -> EnrichedSe
                         cvss_score=cve_row[2],
                         severity=cve_row[3],
                         published=cve_row[4],
+                        epss_probability=epss[0] if epss else None,
+                        epss_percentile=epss[1] if epss else None,
                     )
                 )
 
